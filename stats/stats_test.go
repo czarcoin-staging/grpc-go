@@ -36,10 +36,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func init() {
-	grpc.EnableTracing = false
-}
-
 type connCtxKey struct{}
 type rpcCtxKey struct{}
 
