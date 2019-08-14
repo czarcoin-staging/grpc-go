@@ -27,7 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/trace"
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/encoding"
@@ -230,20 +229,6 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 	if c.creds != nil {
 		callHdr.Creds = c.creds
 	}
-	var trInfo *traceInfo
-	if EnableTracing {
-		trInfo = &traceInfo{
-			tr: trace.New("grpc.Sent."+methodFamily(method), method),
-			firstLine: firstLine{
-				client: true,
-			},
-		}
-		if deadline, ok := ctx.Deadline(); ok {
-			trInfo.firstLine.deadline = time.Until(deadline)
-		}
-		trInfo.tr.LazyLog(&trInfo.firstLine, false)
-		ctx = trace.NewContext(ctx, trInfo.tr)
-	}
 	ctx = newContextWithRPCInfo(ctx, c.failFast, c.codec, cp, comp)
 	sh := cc.dopts.copts.StatsHandler
 	var beginTime time.Time
@@ -281,7 +266,7 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 	cs.callInfo.stream = cs
 	// Only this initial attempt has stats/tracing.
 	// TODO(dfawley): move to newAttempt when per-attempt stats are implemented.
-	if err := cs.newAttemptLocked(sh, trInfo); err != nil {
+	if err := cs.newAttemptLocked(sh); err != nil {
 		cs.finish(err)
 		return nil, err
 	}
@@ -329,12 +314,11 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 
 // newAttemptLocked creates a new attempt with a transport.
 // If it succeeds, then it replaces clientStream's attempt with this new attempt.
-func (cs *clientStream) newAttemptLocked(sh stats.Handler, trInfo *traceInfo) (retErr error) {
+func (cs *clientStream) newAttemptLocked(sh stats.Handler) (retErr error) {
 	newAttempt := &csAttempt{
 		cs:           cs,
 		dc:           cs.cc.dopts.dc,
 		statsHandler: sh,
-		trInfo:       trInfo,
 	}
 	defer func() {
 		if retErr != nil {
@@ -351,9 +335,6 @@ func (cs *clientStream) newAttemptLocked(sh stats.Handler, trInfo *traceInfo) (r
 	t, done, err := cs.cc.getTransport(cs.ctx, cs.callInfo.failFast, cs.callHdr.Method)
 	if err != nil {
 		return err
-	}
-	if trInfo != nil {
-		trInfo.firstLine.SetRemoteAddr(t.RemoteAddr())
 	}
 	newAttempt.t = t
 	newAttempt.done = done
@@ -438,12 +419,7 @@ type csAttempt struct {
 	decomp    encoding.Compressor
 	decompSet bool
 
-	mu sync.Mutex // guards trInfo.tr
-	// trInfo may be nil (if EnableTracing is false).
-	// trInfo.tr is set when created (if EnableTracing is true),
-	// and cleared when the finish method is called.
-	trInfo *traceInfo
-
+	mu           sync.Mutex // guards trInfo.tr
 	statsHandler stats.Handler
 }
 
@@ -566,7 +542,7 @@ func (cs *clientStream) retryLocked(lastErr error) error {
 			cs.commitAttemptLocked()
 			return err
 		}
-		if err := cs.newAttemptLocked(nil, nil); err != nil {
+		if err := cs.newAttemptLocked(nil); err != nil {
 			return err
 		}
 		if lastErr = cs.replayBufferLocked(); lastErr == nil {
@@ -835,13 +811,6 @@ func (cs *clientStream) finish(err error) {
 
 func (a *csAttempt) sendMsg(m interface{}, hdr, payld, data []byte) error {
 	cs := a.cs
-	if a.trInfo != nil {
-		a.mu.Lock()
-		if a.trInfo.tr != nil {
-			a.trInfo.tr.LazyLog(&payload{sent: true, msg: m}, true)
-		}
-		a.mu.Unlock()
-	}
 	if err := a.t.Write(a.s, hdr, payld, &transport.Options{Last: !cs.desc.ClientStreams}); err != nil {
 		if !cs.desc.ClientStreams {
 			// For non-client-streaming RPCs, we return nil instead of EOF on error
@@ -891,13 +860,6 @@ func (a *csAttempt) recvMsg(m interface{}, payInfo *payloadInfo) (err error) {
 			return io.EOF // indicates successful end of stream.
 		}
 		return toRPCErr(err)
-	}
-	if a.trInfo != nil {
-		a.mu.Lock()
-		if a.trInfo.tr != nil {
-			a.trInfo.tr.LazyLog(&payload{sent: false, msg: m}, true)
-		}
-		a.mu.Unlock()
 	}
 	if a.statsHandler != nil {
 		a.statsHandler.HandleRPC(cs.ctx, &stats.InPayload{
@@ -968,16 +930,6 @@ func (a *csAttempt) finish(err error) {
 			Error:     err,
 		}
 		a.statsHandler.HandleRPC(a.cs.ctx, end)
-	}
-	if a.trInfo != nil && a.trInfo.tr != nil {
-		if err == nil {
-			a.trInfo.tr.LazyPrintf("RPC: [OK]")
-		} else {
-			a.trInfo.tr.LazyPrintf("RPC: [%v]", err)
-			a.trInfo.tr.SetError()
-		}
-		a.trInfo.tr.Finish()
-		a.trInfo.tr = nil
 	}
 	a.mu.Unlock()
 }
@@ -1333,7 +1285,6 @@ type serverStream struct {
 
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
-	trInfo                *traceInfo
 
 	statsHandler stats.Handler
 
@@ -1381,18 +1332,6 @@ func (ss *serverStream) SetTrailer(md metadata.MD) {
 
 func (ss *serverStream) SendMsg(m interface{}) (err error) {
 	defer func() {
-		if ss.trInfo != nil {
-			ss.mu.Lock()
-			if ss.trInfo.tr != nil {
-				if err == nil {
-					ss.trInfo.tr.LazyLog(&payload{sent: true, msg: m}, true)
-				} else {
-					ss.trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
-					ss.trInfo.tr.SetError()
-				}
-			}
-			ss.mu.Unlock()
-		}
 		if err != nil && err != io.EOF {
 			st, _ := status.FromError(toRPCErr(err))
 			ss.t.WriteStatus(ss.s, st)
@@ -1441,18 +1380,6 @@ func (ss *serverStream) SendMsg(m interface{}) (err error) {
 
 func (ss *serverStream) RecvMsg(m interface{}) (err error) {
 	defer func() {
-		if ss.trInfo != nil {
-			ss.mu.Lock()
-			if ss.trInfo.tr != nil {
-				if err == nil {
-					ss.trInfo.tr.LazyLog(&payload{sent: false, msg: m}, true)
-				} else if err != io.EOF {
-					ss.trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
-					ss.trInfo.tr.SetError()
-				}
-			}
-			ss.mu.Unlock()
-		}
 		if err != nil && err != io.EOF {
 			st, _ := status.FromError(toRPCErr(err))
 			ss.t.WriteStatus(ss.s, st)

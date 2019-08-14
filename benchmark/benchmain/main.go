@@ -668,7 +668,6 @@ func main() {
 	)
 
 	for _, bf := range opts.generateFeatures(featuresNum) {
-		grpc.EnableTracing = bf.EnableTrace
 		if bf.EnableChannelz {
 			channelz.TurnOn()
 		}
