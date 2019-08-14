@@ -32,8 +32,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/trace"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding"
@@ -90,14 +88,13 @@ type service struct {
 type Server struct {
 	opts serverOptions
 
-	mu     sync.Mutex // guards following
-	lis    map[net.Listener]bool
-	conns  map[transport.ServerTransport]bool
-	serve  bool
-	drain  bool
-	cv     *sync.Cond          // signaled when connections close for GracefulStop
-	m      map[string]*service // service name -> service info
-	events trace.EventLog
+	mu    sync.Mutex // guards following
+	lis   map[net.Listener]bool
+	conns map[transport.ServerTransport]bool
+	serve bool
+	drain bool
+	cv    *sync.Cond          // signaled when connections close for GracefulStop
+	m     map[string]*service // service name -> service info
 
 	quit               *grpcsync.Event
 	done               *grpcsync.Event
@@ -403,17 +400,11 @@ func NewServer(opt ...ServerOption) *Server {
 // printf records an event in s's event log, unless s has been stopped.
 // REQUIRES s.mu is held.
 func (s *Server) printf(format string, a ...interface{}) {
-	if s.events != nil {
-		s.events.Printf(format, a...)
-	}
 }
 
 // errorf records an error in s's event log, unless s has been stopped.
 // REQUIRES s.mu is held.
 func (s *Server) errorf(format string, a ...interface{}) {
-	if s.events != nil {
-		s.events.Errorf(format, a...)
-	}
 }
 
 // RegisterService registers a service and its implementation to the gRPC
@@ -1275,12 +1266,6 @@ func (s *Server) Stop() {
 		c.Close()
 	}
 
-	s.mu.Lock()
-	if s.events != nil {
-		s.events.Finish()
-		s.events = nil
-	}
-	s.mu.Unlock()
 }
 
 // GracefulStop stops the gRPC server gracefully. It stops the server from
@@ -1322,10 +1307,6 @@ func (s *Server) GracefulStop() {
 		s.cv.Wait()
 	}
 	s.conns = nil
-	if s.events != nil {
-		s.events.Finish()
-		s.events = nil
-	}
 	s.mu.Unlock()
 }
 
