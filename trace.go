@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/trace"
+	"google.golang.org/grpc/internal/trace"
 )
 
 // EnableTracing controls whether to trace RPCs using the golang.org/x/net/trace package.
